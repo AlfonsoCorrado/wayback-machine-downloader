@@ -11,6 +11,8 @@ require 'concurrent-ruby'
 require 'logger'
 require 'zlib'
 require 'stringio'
+require 'uri'
+require 'socksify'  # Add SOCKS support
 require_relative 'wayback_machine_downloader/tidy_bytes'
 require_relative 'wayback_machine_downloader/to_regex'
 require_relative 'wayback_machine_downloader/archive_api'
@@ -22,8 +24,9 @@ class ConnectionPool
   DEFAULT_TIMEOUT = 30
   MAX_RETRIES = 3
 
-  def initialize(size)
+  def initialize(size, proxy_config = nil)
     @size = size
+    @proxy_config = proxy_config
     @pool = Concurrent::Map.new
     @creation_times = Concurrent::Map.new
     @cleanup_thread = schedule_cleanup
@@ -78,14 +81,51 @@ class ConnectionPool
   end
 
   def create_connection
-    http = Net::HTTP.new("web.archive.org", 443)
-    http.use_ssl = true
-    http.read_timeout = DEFAULT_TIMEOUT
-    http.open_timeout = DEFAULT_TIMEOUT
-    http.keep_alive_timeout = 30
-    http.max_retries = MAX_RETRIES
-    http.start
-    http
+    if @proxy_config
+      proxy_uri = URI.parse(@proxy_config[:url])
+      
+      if proxy_uri.scheme == 'socks5'
+        # Use SOCKS5 proxy (Tor)
+        setup_socks_proxy(proxy_uri)
+        http = Net::HTTP.new("web.archive.org", 443)
+        http.use_ssl = true
+        http.read_timeout = DEFAULT_TIMEOUT
+        http.open_timeout = DEFAULT_TIMEOUT
+        http.keep_alive_timeout = 30
+        http.max_retries = MAX_RETRIES
+        http.start
+        http
+      else
+        # Use HTTP proxy
+        http = Net::HTTP.new("web.archive.org", 443, proxy_uri.host, proxy_uri.port, 
+                             @proxy_config[:user], @proxy_config[:password])
+        http.use_ssl = true
+        http.read_timeout = DEFAULT_TIMEOUT
+        http.open_timeout = DEFAULT_TIMEOUT
+        http.keep_alive_timeout = 30
+        http.max_retries = MAX_RETRIES
+        http.start
+        http
+      end
+    else
+      # Direct connection (original behavior)
+      http = Net::HTTP.new("web.archive.org", 443)
+      http.use_ssl = true
+      http.read_timeout = DEFAULT_TIMEOUT
+      http.open_timeout = DEFAULT_TIMEOUT
+      http.keep_alive_timeout = 30
+      http.max_retries = MAX_RETRIES
+      http.start
+      http
+    end
+  end
+
+  def setup_socks_proxy(proxy_uri)
+    # Configure SOCKS proxy for all connections
+    TCPSocket.socks_server = proxy_uri.host
+    TCPSocket.socks_port = proxy_uri.port
+    TCPSocket.socks_username = @proxy_config[:user] if @proxy_config[:user]
+    TCPSocket.socks_password = @proxy_config[:password] if @proxy_config[:password]
   end
 
   def schedule_cleanup
@@ -153,7 +193,11 @@ class WaybackMachineDownloader
     @timeout = params[:timeout] || DEFAULT_TIMEOUT
     @logger = setup_logger
     @failed_downloads = Concurrent::Array.new
-    @connection_pool = ConnectionPool.new(CONNECTION_POOL_SIZE)
+    
+    # Setup proxy configuration
+    proxy_config = setup_proxy_config(params)
+    @connection_pool = ConnectionPool.new(CONNECTION_POOL_SIZE, proxy_config)
+    
     @db_mutex = Mutex.new
     @rewrite = params[:rewrite] || false
     @recursive_subdomains = params[:recursive_subdomains] || false
@@ -732,9 +776,35 @@ class WaybackMachineDownloader
 
   private
 
+  def setup_proxy_config(params)
+    return nil unless params[:proxy_url]
+    
+    proxy_uri = URI.parse(params[:proxy_url])
+    
+    # Validate proxy URL format
+    unless ['http', 'https'].include?(proxy_uri.scheme)
+      raise ArgumentError, "Proxy URL must use http or https scheme"
+    end
+    
+    {
+      url: params[:proxy_url],
+      user: params[:proxy_user],
+      password: params[:proxy_password]
+    }
+  end
+
   def validate_params(params)
     raise ArgumentError, "Base URL is required" unless params[:base_url]
     raise ArgumentError, "Maximum pages must be positive" if params[:maximum_pages] && params[:maximum_pages].to_i <= 0
+    
+    # Validate proxy configuration
+    if params[:proxy_url]
+      begin
+        URI.parse(params[:proxy_url])
+      rescue URI::InvalidURIError => e
+        raise ArgumentError, "Invalid proxy URL: #{e.message}"
+      end
+    end
   end
 
   def setup_logger
