@@ -82,6 +82,19 @@ option_parser = OptionParser.new do |opts|
     options[:subdomain_depth] = t
   end
 
+  # Add proxy options
+  opts.on("--proxy PROXY_URL", String, "Proxy URL (e.g., http://proxy.example.com:8080)") do |t|
+    options[:proxy_url] = t
+  end
+
+  opts.on("--proxy-user USERNAME", String, "Proxy username for authentication") do |t|
+    options[:proxy_user] = t
+  end
+
+  opts.on("--proxy-pass PASSWORD", String, "Proxy password for authentication") do |t|
+    options[:proxy_password] = t
+  end
+
   opts.on("-v", "--version", "Display version") do |t|
     options[:version] = t
   end
